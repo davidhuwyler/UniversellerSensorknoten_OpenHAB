@@ -10,4 +10,5 @@
 /doxy/html
 .cwGeneratedFileSetLog
 ProjectInfo.xml
+*.DS_Store
 /Debug
