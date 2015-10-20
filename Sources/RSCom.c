@@ -45,6 +45,8 @@
 
 #define NOF_UINT16_IN_PACKAGE	7
 
+#define NOF_MAX_SLAVES	(128)
+
 typedef struct{
 	uint8 high	:4;
 	uint8 high_i:4;
@@ -75,12 +77,12 @@ typedef struct{						/*! Ticket for RS485 Communication for physical Layer*/
 	uint8 ETX;
 }TICKET_RAW;
 
-#if PL_HAS_OPENHAB // Listeneintrag
+#if PL_HAS_OPENHAB 		//ListEntry for the EventBytes of the slaves
 typedef struct{
-	bool slaveInUse;//komentar
-	bool slaveToPoll;
-	uint16 oldVal;
-	uint16 newVal;
+	bool slaveInUse;	//The Slave witch is polled at the moment
+	bool slaveToPoll;	//All active Slaves
+	uint16 oldVal;		//Old EventByte
+	uint16 newVal;		//New EventByte
 }LIST_ENTRY;
 
 #endif
@@ -136,7 +138,8 @@ static bool sendRepeated;
 #endif
 
 #if PL_HAS_OPENHAB //Liste mit Slaves und deren Eventbytes
-static LIST_ENTRY eventByteList[128]; //Pro Slave ein Listeneintrag //Makro für 128
+static LIST_ENTRY eventByteList[NOF_MAX_SLAVES]; //Pro Slave ein Listeneintrag
+static xQueueHandle eventByteQueue; //Queue für The EventByte Entry
 #endif
 
 
@@ -291,27 +294,8 @@ static void RS_executeCmd(TICKET_DATA *cmd,TICKET_DATA *report){
 #if PL_IS_MASTER
 
 #if PL_HAS_OPENHAB //Prüfung ob sich Eventbyte änderte
-	uint8 i;
-	uint8_t buf_i_str[3];
-	for(i=0;i<128;i++)
-	{
-		if(eventByteList[i].slaveInUse)
-		{
-			eventByteList[i].newVal = command;
-			if(eventByteList[i].oldVal != eventByteList[i].newVal)
-			{
-				buf[0] = '\0';
-				UTIL1_strcat(buf, sizeof(buf), "Events_");
-				UTIL1_Num8uToStr(buf_i_str,sizeof(buf_i_str),i);
-				UTIL1_strcat(buf, sizeof(buf), buf_i_str);
-				UTIL1_strcat(buf, sizeof(buf), ": ");
-				UTIL1_strcatNum16Hex(buf,sizeof(buf),command);
-				UTIL1_strcat(buf, sizeof(buf), "\r\n");
-				SHELL_SendString(buf);
-			}
-			eventByteList[i].oldVal = eventByteList[i].newVal;
-		}
-	}
+
+	FRTOS1_xQueueSendToBack(eventByteQueue,&command,200/portTICK_RATE_MS);
 #else
 
 	buf[0] = '\0';
@@ -491,10 +475,12 @@ static uint8 RS_SendTicket(TICKET_DATA *cmd)
 	return ERR_FAILED;
 }
 
-uint8 RS_SendTicketBlocking(TICKET_DATA *cmd)
+uint8 RS_SendTicketBlocking(TICKET_DATA *cmd,uint16 *data)
 {
 	uint8_t res;
+
 	res = RS_SendTicket(cmd);
+	FRTOS1_xQueueReceive(eventByteQueue, data, 200/portTICK_RATE_MS);
 	if(res != ERR_OK)
 	{
 		return res;
@@ -677,6 +663,48 @@ static void Task_RS_ReadWrite (void *pvParams)
 	}
 }
 
+#if PL_HAS_OPENHAB
+static uint8 FindSlaveInUse (LIST_ENTRY *array)
+{
+
+	uint8 i;
+	for(i=0;i<NOF_MAX_SLAVES;i++)
+	{
+		if(array[i].slaveInUse)
+		{
+			return i;
+		}
+	}
+	return -1; //No slave aktiv ->Error
+
+}
+
+static uint8 FindNextSlave (LIST_ENTRY *array,uint8 currentPos)
+{
+	uint8 j = currentPos+1;
+	while(j<=NOF_MAX_SLAVES-1) //Search for next slave above the actual slave
+	{
+		if(array[j].slaveToPoll)
+		{
+			return j;
+		}
+		j++;
+	}
+	j = 0;
+	while(j<=currentPos) //Serch for slave under the actual slave
+	{
+		if(array[j].slaveToPoll)
+		{
+			return j;
+		}
+		j++;
+	}
+
+	return currentPos; //Just one slave in the system
+
+}
+#endif
+
 #if PL_IS_MASTER
 static void Task_RS_Send (void *pvParams){
 
@@ -687,49 +715,35 @@ static void Task_RS_Send (void *pvParams){
 
 
 #if PL_HAS_OPENHAB //Polling der Eventbytes der Slaves
-			masterSendTicket.VAL1 = 0x01;
-			masterSendTicket.VAL2 = 0x00;
+	masterSendTicket.VAL1 = 0x01;
+	masterSendTicket.VAL2 = 0x00;
+	uint16 newEventByte;
+	uint8 lastSlave = FindSlaveInUse(eventByteList);
+	uint8 currentSlave = FindNextSlave(eventByteList,lastSlave);
 
-			uint8 i,j;
-			for(i=0;i<128;i++) //makro
-			{
-				if(eventByteList[i].slaveInUse)
-				{
-					eventByteList[i].slaveInUse = FALSE;//ID letzter Slave
-					bool foundNext = FALSE;
-					uint8 j = i+1;
-					while(!foundNext && j<=128) //Next oberhalb aktuellem Slave
-					{
-						if(eventByteList[j].slaveToPoll)
-						{
-							eventByteList[j].slaveInUse = TRUE;
-							NC_defineComIDs(0,j);
-							foundNext = TRUE;
-						}
-						j++;
-					}
-					j = 0;
-					while(!foundNext && j<=i) //Next unterhalb aktuellem Slave
-					{
-						if(eventByteList[j].slaveToPoll)
-						{
-							eventByteList[j].slaveInUse = TRUE;
-							NC_defineComIDs(0,j);
-							foundNext = TRUE;
-						}
-						j++;
-					}
+	eventByteList[lastSlave].slaveInUse = FALSE;
+	eventByteList[currentSlave].slaveInUse = TRUE;
+	NC_defineComIDs(0,currentSlave);
+	if(RS_SendTicketBlocking(&masterSendTicket,&newEventByte) == ERR_OK)
+	{
+		eventByteList[currentSlave].newVal = newEventByte;
+		if(eventByteList[currentSlave].oldVal != eventByteList[currentSlave].newVal)
+		{
+			uint8_t buf_slave[3];
+			uint8_t buf[30];
 
-					if(!foundNext) //Es gibt nur einen Slave
-					{
-						eventByteList[i].slaveInUse = TRUE;
-						NC_defineComIDs(0,i);
-					}
-					RS_SendTicket(&masterSendTicket);
-					break;
-				}
+			buf[0] = '\0';
+			UTIL1_strcat(buf, sizeof(buf), "Events_");
+			UTIL1_Num8uToStr(buf_slave,sizeof(buf_slave),currentSlave);
+			UTIL1_strcat(buf, sizeof(buf), buf_slave);
+			UTIL1_strcat(buf, sizeof(buf), ": ");
+			UTIL1_strcatNum16Hex(buf,sizeof(buf),newEventByte);
+			UTIL1_strcat(buf, sizeof(buf), "\r\n");
+			SHELL_SendString(buf);
+		}
+		eventByteList[currentSlave].oldVal = eventByteList[currentSlave].newVal;
+	}
 
-			}
 #else
 			if(RS_SendTicket(&masterSendTicket) == ERR_OK)
 			{
@@ -738,7 +752,7 @@ static void Task_RS_Send (void *pvParams){
 #endif
 		}
 #if PL_HAS_OPENHAB
-		FRTOS1_vTaskDelay(300/portTICK_RATE_MS);
+		FRTOS1_vTaskDelay(100/portTICK_RATE_MS);
 #else
 		FRTOS1_vTaskDelay(3000/portTICK_RATE_MS);
 #endif
@@ -756,8 +770,11 @@ void RS_Init(void){
 #if PL_IS_MASTER
 
 #if PL_HAS_OPENHAB //Init der EventByteList
+
+	eventByteQueue = FRTOS1_xQueueCreate(1,2);
+
 	uint8 i;
-	for (i=0; i<128; i++)
+	for (i=0; i<NOF_MAX_SLAVES; i++)
 	{
 		eventByteList[i].slaveInUse = FALSE;
 		eventByteList[i].slaveToPoll = FALSE;
@@ -768,7 +785,7 @@ void RS_Init(void){
 	eventByteList[0x22].slaveInUse = TRUE;
 
 	//Liste mit allen zu Pollenden Slaves
-
+	eventByteList[0x22].slaveToPoll = TRUE;
 	sendRepeated = TRUE;
 
 #else
