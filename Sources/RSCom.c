@@ -290,12 +290,17 @@ static void RS_executeCmd(TICKET_DATA *cmd,TICKET_DATA *report){
 	uint16 val2 = 0;
 	uint16 val3 = 0;
 	uint8_t buf[30];
+	BaseType_t res;
 
 #if PL_IS_MASTER
 
 #if PL_HAS_OPENHAB //Prüfung ob sich Eventbyte änderte
 
-	FRTOS1_xQueueSendToBack(eventByteQueue,&command,200/portTICK_RATE_MS);
+	res =FRTOS1_xQueueSendToBack(eventByteQueue,&command,200/portTICK_RATE_MS);
+	if(res != pdPASS)
+	{
+		SHELL_SendString("Queue Full!/r/n");
+	}
 #else
 
 	buf[0] = '\0';
@@ -478,13 +483,22 @@ static uint8 RS_SendTicket(TICKET_DATA *cmd)
 uint8 RS_SendTicketBlocking(TICKET_DATA *cmd,uint16 *data)
 {
 	uint8_t res;
-
+	FRTOS1_taskENTER_CRITICAL();
+	FRTOS1_xQueueReceive(eventByteQueue,data,0); //Queue leeren
 	res = RS_SendTicket(cmd);
-	FRTOS1_xQueueReceive(eventByteQueue, data, 200/portTICK_RATE_MS);
+	FRTOS1_taskEXIT_CRITICAL();
 	if(res != ERR_OK)
 	{
+		*data=0x0000;
 		return res;
 	}
+
+	if(FRTOS1_xQueueReceive(eventByteQueue, data, 10/portTICK_RATE_MS)!=pdPASS)
+	{
+		*data=0x0000;
+		return ERR_NOTAVAIL;
+	}
+
 	return ERR_OK;
 }
 
@@ -666,7 +680,6 @@ static void Task_RS_ReadWrite (void *pvParams)
 #if PL_HAS_OPENHAB
 static uint8 FindSlaveInUse (LIST_ENTRY *array)
 {
-
 	uint8 i;
 	for(i=0;i<NOF_MAX_SLAVES;i++)
 	{
@@ -676,7 +689,6 @@ static uint8 FindSlaveInUse (LIST_ENTRY *array)
 		}
 	}
 	return -1; //No slave aktiv ->Error
-
 }
 
 static uint8 FindNextSlave (LIST_ENTRY *array,uint8 currentPos)
@@ -691,7 +703,7 @@ static uint8 FindNextSlave (LIST_ENTRY *array,uint8 currentPos)
 		j++;
 	}
 	j = 0;
-	while(j<=currentPos) //Serch for slave under the actual slave
+	while(j<=currentPos) //Search for slave under the actual slave
 	{
 		if(array[j].slaveToPoll)
 		{
@@ -718,16 +730,20 @@ static void Task_RS_Send (void *pvParams){
 	masterSendTicket.VAL1 = 0x01;
 	masterSendTicket.VAL2 = 0x00;
 	uint16 newEventByte;
+
 	uint8 lastSlave = FindSlaveInUse(eventByteList);
 	uint8 currentSlave = FindNextSlave(eventByteList,lastSlave);
+	uint8 res;
 
 	eventByteList[lastSlave].slaveInUse = FALSE;
 	eventByteList[currentSlave].slaveInUse = TRUE;
 	NC_defineComIDs(0,currentSlave);
-	if(RS_SendTicketBlocking(&masterSendTicket,&newEventByte) == ERR_OK)
+	res=RS_SendTicketBlocking(&masterSendTicket,&newEventByte);
+	if(res == ERR_OK)
 	{
 		eventByteList[currentSlave].newVal = newEventByte;
-		if(eventByteList[currentSlave].oldVal != eventByteList[currentSlave].newVal)
+
+		if(res = eventByteList[currentSlave].oldVal != eventByteList[currentSlave].newVal)
 		{
 			uint8_t buf_slave[3];
 			uint8_t buf[30];
@@ -740,8 +756,17 @@ static void Task_RS_Send (void *pvParams){
 			UTIL1_strcatNum16Hex(buf,sizeof(buf),newEventByte);
 			UTIL1_strcat(buf, sizeof(buf), "\r\n");
 			SHELL_SendString(buf);
+			eventByteList[currentSlave].oldVal = eventByteList[currentSlave].newVal;
 		}
-		eventByteList[currentSlave].oldVal = eventByteList[currentSlave].newVal;
+
+	}
+	else if(res == ERR_NOTAVAIL)
+	{
+		SHELL_SendString("TimeOut\r\n");
+	}
+	else
+	{
+		SHELL_SendString("Error SendTicketBlocking\r\n");
 	}
 
 #else
