@@ -296,7 +296,7 @@ static void RS_executeCmd(TICKET_DATA *cmd,TICKET_DATA *report){
 
 #if PL_HAS_OPENHAB //Prüfung ob sich Eventbyte änderte
 
-	res =FRTOS1_xQueueSendToBack(eventByteQueue,&command,200/portTICK_RATE_MS);
+	res =FRTOS1_xQueueSendToBack(eventByteQueue,&command,50/portTICK_RATE_MS);
 	if(res != pdPASS)
 	{
 		SHELL_SendString("Queue Full!/r/n");
@@ -483,17 +483,24 @@ static uint8 RS_SendTicket(TICKET_DATA *cmd)
 uint8 RS_SendTicketBlocking(TICKET_DATA *cmd,uint16 *data)
 {
 	uint8_t res;
-	FRTOS1_taskENTER_CRITICAL();
-	FRTOS1_xQueueReceive(eventByteQueue,data,0); //Queue leeren
+	FRTOS1_vTaskSuspendAll();
+	//FRTOS1_taskENTER_CRITICAL();
+
+
+	FRTOS1_xQueueReset(eventByteQueue);
+
+	//FRTOS1_xQueueReceive(eventByteQueue,data,0); //Queue leeren
 	res = RS_SendTicket(cmd);
-	FRTOS1_taskEXIT_CRITICAL();
+
+	FRTOS1_xTaskResumeAll();
+	//FRTOS1_taskEXIT_CRITICAL();
 	if(res != ERR_OK)
 	{
 		*data=0x0000;
 		return res;
 	}
 
-	if(FRTOS1_xQueueReceive(eventByteQueue, data, 10/portTICK_RATE_MS)!=pdPASS)
+	if(FRTOS1_xQueueReceive(eventByteQueue, data, 20/portTICK_RATE_MS)!=pdPASS)
 	{
 		*data=0x0000;
 		return ERR_NOTAVAIL;

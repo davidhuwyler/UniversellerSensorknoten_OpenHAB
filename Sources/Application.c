@@ -46,12 +46,12 @@ static void APP_HandleEvents(EVENT_Handle event)
 #endif
 		break;
 	case EVENT_PIR1_MOTION:
-		CLS1_SendStr("PIR1 motion detected\r\n", CLS1_GetStdio()->stdOut);
 		Sens_eventDetected(SENS_PIR1_EVENT);
+		CLS1_SendStr("PIR1 motion detected\r\n", CLS1_GetStdio()->stdOut);
 		break;
 	case EVENT_PIR2_MOTION:
-		CLS1_SendStr("PIR2 motion detected\r\n", CLS1_GetStdio()->stdOut);
 		Sens_eventDetected(SENS_PIR2_EVENT);
+		CLS1_SendStr("PIR2 motion detected\r\n", CLS1_GetStdio()->stdOut);
 		break;
 #if PL_NOF_KEYS >= 1
     case EVENT_SW1_PRESSED:
@@ -89,7 +89,7 @@ static void APP_Task(void)
 	EVENT_SetEvent(EVENT_STARTUP);	/* set startup event */
 	for(;;){
 		EVENT_HandleEvent(APP_HandleEvents);
-		WAIT1_WaitOSms(100); /* wait some time */
+		FRTOS1_vTaskDelay(20/portTICK_RATE_MS);
 	}
 }
 
